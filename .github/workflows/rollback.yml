@@ -1,0 +1,60 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Cloud Run revision to roll back to. Leave empty to use the previous revision."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve target revision
+        id: target
+        run: |
+          if [ -n "${{ inputs.revision }}" ]; then
+            TARGET="${{ inputs.revision }}"
+          else
+            CURRENT=$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
+              --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+              --format 'value(status.traffic[0].revisionName)')
+            # Revisions sorted newest first; pick the first one that isn't current
+            TARGET=$(gcloud run revisions list --service "$CLOUD_RUN_SERVICE" \
+              --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+              --sort-by '~metadata.creationTimestamp' \
+              --format 'value(metadata.name)' | grep -vx "$CURRENT" | head -n1)
+          fi
+          test -n "$TARGET" || { echo "No revision found to roll back to"; exit 1; }
+          echo "Rolling back to $TARGET"
+          echo "revision=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Route 100% traffic to target revision
+        run: |
+          gcloud run services update-traffic "$CLOUD_RUN_SERVICE" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+            --to-revisions "${{ steps.target.outputs.revision }}=100"
+
+      - name: Smoke test
+        run: |
+          URL=$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+            --format 'value(status.url)')
+          code=$(curl -s -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 5 --retry-all-errors "$URL/")
+          test "$code" = "204"

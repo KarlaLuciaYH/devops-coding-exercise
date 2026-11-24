@@ -1,0 +1,27 @@
+#!/bin/bash
+set -euxo pipefail
+
+cat > /etc/yum.repos.d/mongodb-org-7.0.repo <<'REPO'
+[mongodb-org-7.0]
+name=MongoDB Repository
+baseurl=https://repo.mongodb.org/yum/amazon/2023/mongodb-org/7.0/x86_64/
+gpgcheck=1
+enabled=1
+gpgkey=https://pgp.mongodb.com/server-7.0.asc
+REPO
+
+dnf install -y mongodb-org mongodb-mongosh
+
+# Listen on the private IP; the security group restricts who can connect
+sed -i 's/^  bindIp: .*/  bindIp: 0.0.0.0/' /etc/mongod.conf
+
+systemctl enable --now mongod
+until mongosh --quiet --eval 'db.runCommand({ping:1})' >/dev/null 2>&1; do sleep 2; done
+
+mongosh --quiet "${db_name}" --eval '
+  db.createUser({ user: "${user}", pwd: "${password}", roles: [{ role: "readWrite", db: "${db_name}" }] })
+'
+
+# Enable authentication
+printf '\nsecurity:\n  authorization: enabled\n' >> /etc/mongod.conf
+systemctl restart mongod
